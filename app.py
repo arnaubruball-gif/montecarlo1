@@ -3,133 +3,138 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 
-# --- 1. CONFIGURACIÓN ---
-st.set_page_config(page_title="High-Speed Quants", layout="wide", page_icon="⚡")
+# --- 1. CONFIGURACIÓN E INTERFAZ ---
+st.set_page_config(page_title="Ultra-Quant Terminal", layout="wide", page_icon="⚡")
 
 st.markdown("""
     <style>
     .main { background-color: #0d1117; color: white; }
     div[data-testid="stMetric"] { background-color: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 15px; }
-    .trade-box { padding: 20px; border-radius: 10px; margin-bottom: 20px; border-left: 8px solid; }
-    .buy { background-color: #052111; border-color: #3fb950; }
-    .wait { background-color: #211d05; border-color: #d29922; }
-    .danger { background-color: #210505; border-color: #f85149; }
+    .trade-card { padding: 20px; border-radius: 10px; margin-bottom: 20px; border-left: 10px solid; }
+    .long { background-color: #052111; border-color: #3fb950; }
+    .short { background-color: #210505; border-color: #f85149; }
+    .neutral { background-color: #1c1c1c; border-color: #8b949e; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. LÓGICA CUANTITATIVA ---
-def get_indicators(df):
+# --- 2. MOTOR CUANTITATIVO (INDICADORES DE VELOCIDAD) ---
+def get_quant_metrics(df):
     # ATR (Volatilidad para Stop Loss)
     high_low = df['High'] - df['Low']
     high_close = np.abs(df['High'] - df['Close'].shift())
     low_close = np.abs(df['Low'] - df['Close'].shift())
-    ranges = pd.concat([high_low, high_close, low_close], axis=1)
-    true_range = np.max(ranges, axis=1)
-    df['ATR'] = true_range.rolling(14).mean()
+    df['TR'] = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    df['ATR'] = df['TR'].rolling(14).mean()
     
-    # RSI (Fuerza Relativa)
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    df['RSI'] = 100 - (100 / (1 + rs))
-    
-    # Z-Score de Precio (Distancia a la media)
+    # Bandas de Bollinger (Límites Estadísticos)
     df['MA20'] = df['Close'].rolling(window=20).mean()
     df['STD20'] = df['Close'].rolling(window=20).std()
-    df['Z_Score'] = (df['Close'] - df['MA20']) / df['STD20']
+    df['Upper_B'] = df['MA20'] + (df['STD20'] * 2)
+    df['Lower_B'] = df['MA20'] - (df['STD20'] * 2)
+    
+    # ADX (Fuerza de la Tendencia)
+    plus_dm = df['High'].diff()
+    minus_dm = df['Low'].diff()
+    plus_dm[plus_dm < 0] = 0
+    minus_dm[minus_dm > 0] = 0
+    tr_14 = df['TR'].rolling(14).sum()
+    plus_di = 100 * (plus_dm.rolling(14).sum() / tr_14)
+    minus_di = 100 * (abs(minus_dm).rolling(14).sum() / tr_14)
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    df['ADX'] = dx.rolling(14).mean()
+    
+    # Sharpe Ratio (Eficiencia del precio)
+    returns = df['Close'].pct_change()
+    df['Sharpe'] = (returns.mean() / returns.std()) * np.sqrt(252)
     
     return df
 
-@st.cache_data(ttl=600)
-def fetch_trading_data(ticker_symbol):
+@st.cache_data(ttl=300)
+def fetch_data(ticker):
     try:
-        dat = yf.Ticker(ticker_symbol)
-        hist = dat.history(period="6mo") # 6 meses es ideal para swing
-        if hist.empty: return None, None
-        return dat.info, hist
-    except: return None, None
+        stock = yf.Ticker(ticker)
+        hist = stock.history(period="1y")
+        if hist.empty: return None
+        return get_quant_metrics(hist)
+    except: return None
 
-# --- 3. SIDEBAR: GESTIÓN DE CAPITAL ---
-st.sidebar.title("💰 Risk Management")
-capital = st.sidebar.number_input("Capital Total ($)", value=10000)
-risk_per_trade = st.sidebar.slider("Riesgo por Operación (%)", 0.5, 5.0, 1.0) / 100
+# --- 3. SIDEBAR: CONTROL DE RIESGO Y APALANCAMIENTO ---
+st.sidebar.title("🛠️ Risk Manager")
+capital = st.sidebar.number_input("Capital en Cuenta ($)", value=5000)
+risk_pct = st.sidebar.slider("Riesgo por Operación (%)", 0.5, 3.0, 1.0) / 100
 leverage = st.sidebar.number_input("Apalancamiento (X)", value=5, min_value=1)
 
-ticker = st.sidebar.text_input("Ticker para Swing", "TSLA").upper()
-info, hist = fetch_trading_data(ticker)
+ticker = st.sidebar.text_input("Ticker (Ej: ICE, EQIX, HAG.DE)", "ICE").upper()
+df = fetch_data(ticker)
 
-# --- 4. DASHBOARD ---
-if info and not hist.empty:
-    hist = get_indicators(hist)
-    last_price = hist['Close'].iloc[-1]
-    last_atr = hist['ATR'].iloc[-1]
-    last_rsi = hist['RSI'].iloc[-1]
-    last_z = hist['Z_Score'].iloc[-1]
+# --- 4. PANEL DE OPERATIVA ---
+if df is not None:
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
     
-    st.title(f"⚡ Trading Analysis: {ticker}")
+    st.title(f"⚡ Operativa de Corto Plazo: {ticker}")
     
-    # MÉTRICAS DE ENTRADA
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Precio", f"{last_price:.2f}")
-    c2.metric("RSI (14d)", f"{last_rsi:.1f}")
-    c3.metric("ATR (Volatilidad)", f"{last_atr:.2f}")
-    c4.metric("Z-Score Precio", f"{last_z:.2f}")
+    # MÉTRICAS DE VOLATILIDAD Y FUERZA
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Precio Actual", f"{last['Close']:.2f}")
+    m2.metric("ADX (Tendencia)", f"{last['ADX']:.1f}", help=">25 indica tendencia fuerte")
+    m3.metric("Sharpe Ratio", f"{last['Sharpe']:.2f}", help="Calidad del movimiento")
+    m4.metric("ATR (Volatilidad)", f"{last['ATR']:.2f}")
 
     st.divider()
 
-    # --- PESTAÑAS DE OPERATIVA ---
-    t_signal, t_risk, t_chart = st.tabs(["🎯 SEÑAL QUANTO", "🛡️ CALCULADORA RIESGO", "📈 GRÁFICO TÉCNICO"])
+    # --- PESTAÑAS ---
+    t_signal, t_stats, t_calc = st.tabs(["🎯 SEÑAL QUANT", "📊 MÉTRICAS AVANZADAS", "🧮 CALCULADORA DE LOTES"])
 
     with t_signal:
-        st.subheader("Estado de la Tendencia")
-        
-        
-        # Lógica de señales
-        score = 0
-        if last_rsi > 50: score += 1
-        if last_price > hist['MA20'].iloc[-1]: score += 1
-        if last_z < 1.5: score += 1 # No está excesivamente caro
+        # Lógica de señales combinada
+        trend_strong = last['ADX'] > 25
+        oversold = last['Close'] < last['Lower_B']
+        overbought = last['Close'] > last['Upper_B']
+        momentum = last['Close'] > last['MA20']
 
-        if score == 3:
-            st.markdown(f"<div class='trade-box buy'><h2>🚀 SEÑAL: LONG (COMPRA)</h2>Fuerza confirmada. Z-Score saludable.</div>", unsafe_allow_html=True)
-        elif score == 2:
-            st.markdown(f"<div class='trade-box wait'><h2>⚖️ SEÑAL: NEUTRAL</h2>Esperar confirmación de RSI o Media Móvil.</div>", unsafe_allow_html=True)
+        if oversold and trend_strong:
+            st.markdown("<div class='trade-card long'><h2>🚀 COMPRA (Reversión Media)</h2>Precio en suelo estadístico con tendencia fuerte.</div>", unsafe_allow_html=True)
+        elif momentum and trend_strong and not overbought:
+            st.markdown("<div class='trade-card long'><h2>📈 COMPRA (Momentum)</h2>Tendencia confirmada y con espacio para subir.</div>", unsafe_allow_html=True)
+        elif overbought:
+            st.markdown("<div class='trade-card short'><h2>⚠️ VENTA / TAKE PROFIT</h2>Extremo de sobrecompra. Riesgo de retroceso.</div>", unsafe_allow_html=True)
         else:
-            st.markdown(f"<div class='trade-box danger'><h2>⚠️ SEÑAL: EVITAR</h2>Debilidad técnica o sobrecompra extrema.</div>", unsafe_allow_html=True)
+            st.markdown("<div class='trade-card neutral'><h2>⚖️ ESPERAR</h2>No hay ventaja estadística clara ahora mismo.</div>", unsafe_allow_html=True)
 
-    with t_risk:
-        st.subheader("Planificación de la Operación")
-        # Cálculo de Stop Loss dinámico (2.5x ATR)
-        stop_loss = last_price - (2.5 * last_atr)
-        distancia_stop = last_price - stop_loss
+    with t_stats:
+        st.subheader("Análisis de Desviación")
         
-        # Tamaño de la posición (Cuanto comprar para arriesgar solo el % del capital)
-        dinero_en_riesgo = capital * risk_per_trade
-        num_acciones = dinero_en_riesgo / distancia_stop
-        posicion_nominal = num_acciones * last_price
-        margen_requerido = posicion_nominal / leverage
-        
-        r1, r2 = st.columns(2)
-        with r1:
-            st.write(f"**Niveles Técnicos:**")
-            st.info(f"🛑 Stop-Loss Sugerido: **{stop_loss:.2f}**")
-            st.success(f"🎯 Take-Profit Sugerido (Risk 1:2): **{last_price + (distancia_stop * 2):.2f}**")
-        
-        with r2:
-            st.write(f"**Gestión de Lotes:**")
-            st.write(f"Acciones a comprar: `{int(num_acciones)}` unidades")
-            st.write(f"Valor nominal de la posición: `${posicion_nominal:.2f}`")
-            st.write(f"Margen requerido (con apalancamiento): `${margen_requerido:.2f}`")
-            
+        st.line_chart(df[['Close', 'Upper_B', 'Lower_B', 'MA20']].tail(60))
+        st.write(f"Distancia a la banda superior: **{last['Upper_B'] - last['Close']:.2f}**")
+        st.write(f"Fuerza de tendencia (ADX): **{last['ADX']:.1f}**")
 
-    with t_chart:
-        st.subheader("Movimiento de los últimos 6 meses")
-        st.line_chart(hist[['Close', 'MA20']])
-        st.caption("La línea azul es el precio, la roja es la media móvil de 20 periodos (tu soporte dinámico).")
+    with t_calc:
+        st.subheader("Planificación Apalancada")
+        # Stop Loss a 2x ATR (Seguridad ante latigazos)
+        stop_price = last['Close'] - (2 * last['ATR'])
+        take_profit = last['Close'] + (4 * last['ATR'])
+        risk_per_share = last['Close'] - stop_price
+        
+        # Tamaño de posición basado en riesgo monetario
+        shares_to_buy = (capital * risk_pct) / risk_per_share
+        notional_value = shares_to_buy * last['Close']
+        required_margin = notional_value / leverage
+
+        c_r1, c_r2 = st.columns(2)
+        with c_r1:
+            st.info(f"🛑 STOP-LOSS: **{stop_price:.2f}**")
+            st.success(f"🎯 TAKE-PROFIT: **{take_profit:.2f}**")
+        
+        with c_r2:
+            st.write(f"Acciones a operar: **{int(shares_to_buy)}**")
+            st.write(f"Valor nominal: **${notional_value:.2f}**")
+            st.warning(f"Margen real a aportar: **${required_margin:.2f}**")
+        
+        
+
+    st.divider()
+    st.caption("Recuerda: El apalancamiento es una herramienta de precisión. Si el ADX es bajo, reduce el tamaño de la posición.")
 
 else:
-    st.error("No se pudo conectar con Yahoo Finance. Revisa el Ticker.")
-
-# --- 5. RECORDATORIO DE RIESGO ---
-st.sidebar.warning("🚨 El apalancamiento aumenta el riesgo. Nunca arriesgues más del 2% de tu capital por operación.")
+    st.error("Error: Ticker no encontrado o exceso de peticiones a la API.")
