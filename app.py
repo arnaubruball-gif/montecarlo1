@@ -2,87 +2,86 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import plotly.graph_objects as go
+from datetime import datetime, timedelta
 
-# --- 1. ESTILO Y CONFIGURACIÓN ---
-st.set_page_config(page_title="Decision Terminal + RoboInsights", layout="wide", page_icon="📈")
+st.set_page_config(page_title="Z-Diff M15 Scalper", layout="wide")
 
-st.markdown("""
-    <style>
-    .metric-card { background-color: #161b22; border: 1px solid #30363d; padding: 15px; border-radius: 10px; }
-    .status-alert { padding: 20px; border-radius: 10px; font-weight: bold; text-align: center; font-size: 20px; }
-    .go { border: 2px solid #3fb950; color: #3fb950; background-color: #052111; }
-    .stop { border: 2px solid #f85149; color: #f85149; background-color: #210505; }
-    .warn { border: 2px solid #d29922; color: #d29922; background-color: #211d05; }
-    </style>
-    """, unsafe_allow_html=True)
+# --- MOTOR DE CÁLCULO ---
+def get_scalping_data(ticker):
+    # Descargamos 5 días de datos en M15 para tener contexto
+    df = yf.download(ticker, period='5d', interval='15m', progress=False)
+    if df.empty: return None
+    if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
 
-# --- 2. CÁLCULOS DE ALTA VELOCIDAD ---
-def get_live_metrics(df):
-    # Z-Score de Precio (Distancia a la media de 20 días)
-    df['MA20'] = df['Close'].rolling(20).mean()
-    df['Z_Price'] = (df['Close'] - df['MA20']) / df['Close'].rolling(20).std()
+    # 1. VWAP Cálculo (Acumulado diario)
+    df['Typical_Price'] = (df['High'] + df['Low'] + df['Close']) / 3
+    df['VP'] = df['Typical_Price'] * df['Volume']
     
-    # Momentum de 5 días (Aceleración pura)
-    df['Mom5'] = (df['Close'] / df['Close'].shift(5) - 1) * 100
+    # Agrupamos por día para resetear la VWAP
+    df['Date'] = df.index.date
+    df['VWAP'] = df.groupby('Date')['VP'].cumsum() / df.groupby('Date')['Volume'].cumsum()
     
-    # ATR % (Volatilidad relativa al precio)
-    high_low = df['High'] - df['Low']
-    df['ATR_Pct'] = (high_low.rolling(14).mean() / df['Close']) * 100
+    # 2. Bandas de Desviación (Liquidez Institucional)
+    df['VWAP_Std'] = df.groupby('Date')['Typical_Price'].transform(lambda x: x.expanding().std())
+    df['Upper_Band'] = df['VWAP'] + (2 * df['VWAP_Std'])
+    df['Lower_Band'] = df['VWAP'] - (2 * df['VWAP_Std'])
+
+    # 3. Z-DIFF (Retorno vs Flujo de Dinero)
+    df['Ret'] = df['Close'].pct_change()
+    df['RMF'] = df['Close'] * (df['High'] - df['Low']) * 1000 # Proxy de flujo
+    
+    window = 14
+    diff = df['Ret'].rolling(window).sum() - df['RMF'].pct_change().rolling(window).sum()
+    df['Z_Diff'] = (diff - diff.rolling(window).mean()) / (diff.rolling(window).std() + 1e-10)
     
     return df
 
-# --- 3. INTERFAZ ---
-st.title("⚡ Terminal de Ejecución Rápida")
-ticker = st.sidebar.text_input("Ticker", "TSLA").upper()
+# --- INTERFAZ ---
+st.title("⚡ M15 Institutional Scalper")
+ticker = st.text_input("Símbolo (ej: SPY, QQQ, BTC-USD)", "SPY")
 
-try:
-    data = yf.Ticker(ticker).history(period="3mo")
-    df = get_live_metrics(data)
-    curr = df.iloc[-1]
+data = get_scalping_data(ticker)
+
+if data is not None:
+    last_row = data.iloc[-1]
     
-    # --- SEMÁFORO DE DECISIÓN ---
-    # Combinamos Z-Score (Peligro de techo) con Momentum (Gasolina)
-    z = curr['Z_Price']
-    m = curr['Mom5']
-    v = curr['ATR_Pct']
-
-    if z > 2.0:
-        msg, style = "🚨 PELIGRO: SOBRECOMPRA. No entres, va a caer al pozo.", "stop"
-    elif z < 0 and m > 1.0:
-        msg, style = "🚀 MOMENTO IDEAL: Rebote con fuerza desde la media.", "go"
-    elif m > 3.0:
-        msg, style = "🔥 COMPRA MOMENTUM: Aceleración confirmada.", "go"
-    else:
-        msg, style = "⚖️ ESPERA: El mercado está lateral o sin dirección.", "warn"
-
-    st.markdown(f"<div class='status-alert {style}'>{msg}</div>", unsafe_allow_html=True)
-
-    # --- PANELES DE APOYO ---
-    st.divider()
+    # Dashboard de Métricas
     c1, c2, c3 = st.columns(3)
+    z_val = float(last_row['Z_Diff'])
     
-    with c1:
-        st.subheader("📍 Posición (Z-Score)")
-        st.metric("Desviación", f"{z:.2f}")
-        st.caption("Si es >2, el precio está 'hinchado'. Si es < -2, está en liquidación.")
-        
+    # Lógica de Señal
+    # COMPRA: Precio bajo VWAP + Z-Diff < -1.5 (Agotamiento de ventas)
+    # VENTA: Precio sobre VWAP + Z-Diff > 1.5 (Agotamiento de compras)
+    status = "⚪ NEUTRAL"
+    if last_row['Close'] < last_row['VWAP'] and z_val < -1.5:
+        status = "🟢 SEÑAL DE COMPRA (Reversión a VWAP)"
+    elif last_row['Close'] > last_row['VWAP'] and z_val > 1.5:
+        status = "🚨 SEÑAL DE VENTA (Reversión a VWAP)"
 
-    with c2:
-        st.subheader("🏎️ Velocidad (Momentum)")
-        st.metric("Variación 5d", f"{m:.2f}%")
-        st.caption("Buscamos +2% para confirmar que hay dinero entrando de verdad.")
+    c1.metric("Precio Actual", f"{last_row['Close']:.2f}")
+    c2.metric("Z-Diff (14p)", f"{z_val:.2f}")
+    c3.subheader(status)
 
-    with c3:
-        st.subheader("🌪️ Volatilidad (ATR %)")
-        st.metric("Riesgo Movimiento", f"{v:.2f}%")
-        st.caption("Cruza esto con RoboForex: si allí marca 'Alta', reduce tu apalancamiento.")
-        
+    # Gráfico Profesional
+    fig = go.Figure()
 
-    # --- GRÁFICO DE TENSIÓN ---
-    st.divider()
-    st.subheader("Visualización del 'Pozo'")
-    st.line_chart(df[['Close', 'MA20']].tail(40))
-    st.info("💡 TIP: Si la línea azul (Precio) está muy lejos de la roja (Media), el riesgo de 'caída al pozo' aumenta por regresión a la media.")
+    # Velas
+    fig.add_trace(go.Candlestick(x=data.index, open=data['Open'], high=data['High'],
+                                 low=data['Low'], close=data['Close'], name="Precio"))
 
-except:
-    st.error("Introduce un Ticker válido.")
+    # VWAP y Bandas
+    fig.add_trace(go.Scatter(x=data.index, y=data['VWAP'], line=dict(color='orange', width=2), name="VWAP"))
+    fig.add_trace(go.Scatter(x=data.index, y=data['Upper_Band'], line=dict(color='gray', dash='dot'), name="+2 Std"))
+    fig.add_trace(go.Scatter(x=data.index, y=data['Lower_Band'], line=dict(color='gray', dash='dot'), name="-2 Std"))
+
+    fig.update_layout(template="plotly_dark", height=600, xaxis_rangeslider_visible=False)
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Gráfico de Z-Diff inferior
+    fig_z = go.Figure()
+    fig_z.add_trace(go.Scatter(x=data.index, y=data['Z_Diff'], line=dict(color='cyan')))
+    fig_z.add_hline(y=1.5, line_dash="dash", line_color="red")
+    fig_z.add_hline(y=-1.5, line_dash="dash", line_color="green")
+    fig_z.update_layout(template="plotly_dark", height=200, title="Z-Diff Oscillator")
+    st.plotly_chart(fig_z, use_container_width=True)
