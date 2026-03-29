@@ -1,101 +1,170 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from scipy import stats
+from datetime import datetime, timedelta
+import json
 
-# --- 1. CONFIGURACIÓN ---
-st.set_page_config(page_title="Z-Sniper v8: Indicator History", layout="wide")
+# ─── CONFIGURACIÓN DE PÁGINA ──────────────────────────────────────────────────
+st.set_page_config(page_title="OrderFlow PRO | Quant Dashboard", layout="wide")
 
+# Estilo CSS para apariencia "Terminal Bloomberg / Dark Quant"
 st.markdown("""
-    <style>
-    @keyframes blinker { 50% { opacity: 0; } }
-    .blink-buy { animation: blinker 1s linear infinite; background-color: #00ffcc; color: black; padding: 15px; border-radius: 8px; text-align: center; font-weight: bold; }
-    .blink-sell { animation: blinker 1s linear infinite; background-color: #ff4b4b; color: white; padding: 15px; border-radius: 8px; text-align: center; font-weight: bold; }
-    </style>
-    """, unsafe_allow_html=True)
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap');
+    html, body, [class*="css"] { font-family: 'JetBrains Mono', monospace; }
+    .stMetric { background: #0e1117; border: 1px solid #1e293b; padding: 15px; border-radius: 5px; }
+    .reportview-container { background: #04070d; }
+</style>
+""", unsafe_allow_html=True)
 
-ASSET_MAP = {
-    "EUR/USD": "EURUSD=X",
-    "GBP/USD": "GBPUSD=X",
-    "ORO (XAU/USD)": "GC=F",
-    "S&P 500": "ES=F",
-    "NASDAQ 100": "NQ=F"
-}
+# ─── MOTOR DE DATOS (CONECTOR PROFESIONAL) ────────────────────────────────────
 
-@st.cache_data(ttl=15)
-def get_data(ticker):
+def get_data_pro(api_key, provider, symbol, timeframe="4h", limit=100):
+    """Descarga datos usando APIs oficiales para evitar bloqueos legales."""
     try:
-        df = yf.download(ticker, period='5d', interval='15m', progress=False, auto_adjust=True)
-        if df.empty: return None
-        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+        if provider == "Polygon.io":
+            from polygon import RESTClient
+            client = RESTClient(api_key)
+            # Mapeo: 4h en Polygon es multiplier=4, timespan="hour"
+            aggs = client.get_aggs(ticker=symbol, multiplier=4, timespan="hour", 
+                                   from_="2025-01-01", to="2026-12-31", limit=limit)
+            df = pd.DataFrame(aggs)
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df.set_index('timestamp', inplace=True)
+            df = df.rename(columns={'o':'Open','h':'High','l':'Low','c':'Close','v':'Volume'})
+            return df
+            
+        elif provider == "Alpha Vantage":
+            from alpha_vantage.timeseries import TimeSeries
+            ts = TimeSeries(key=api_key, output_format='pandas')
+            # AV no tiene 4h nativo, bajamos 60min y resampleamos
+            data, _ = ts.get_intraday(symbol=symbol, interval='60min', outputsize='full')
+            data.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+            df = data.resample('4H').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
+            return df.tail(limit)
+    except Exception as e:
+        st.error(f"Error de conexión: {e}")
+        return None
+
+# ─── LÓGICA CUANTITATIVA AVANZADA ──────────────────────────────────────────────
+
+def calc_quant_metrics(df):
+    # 1. Z-Diff (Flujo Institucional Relativo)
+    df['returns'] = df['Close'].pct_change()
+    df['vol_pct'] = df['Volume'] * df['returns']
+    mu = df['vol_pct'].rolling(14).mean()
+    std = df['vol_pct'].rolling(14).std()
+    df['z_flow'] = (df['vol_pct'] - mu) / std
+
+    # 2. Monte Carlo (Proyección Estadística)
+    last_price = df['Close'].iloc[-1]
+    returns = df['returns'].dropna()
+    sims = 1000
+    days = 5  # Proyectar a 5 velas (20h en H4)
+    
+    # Simulación GBM (Geometric Brownian Motion)
+    drift = returns.mean()
+    vol = returns.std()
+    rand_walk = np.exp((drift - 0.5 * vol**2) + vol * np.random.standard_normal((sims, days)))
+    paths = np.zeros_like(rand_walk)
+    paths[:, 0] = last_price
+    for t in range(1, days):
+        paths[:, t] = paths[:, t-1] * rand_walk[:, t]
+    
+    # 3. Markov (Probabilidad de Estado)
+    # Definimos estados: -1 (Bajista), 0 (Neutral), 1 (Alcista)
+    bins = [-np.inf, -0.002, 0.002, np.inf]
+    df['state'] = pd.cut(df['returns'], bins=bins, labels=[-1, 0, 1])
+    # Matriz de transición simplificada (P de que el siguiente sea Alcista dado el actual)
+    current_state = df['state'].iloc[-1]
+    next_state_probs = df.groupby('state')['state'].shift(-1).value_counts(normalize=True).loc[current_state]
+    
+    return df, paths, next_state_probs
+
+# ─── INTERFAZ DE USUARIO (SIDEBAR) ─────────────────────────────────────────────
+
+with st.sidebar:
+    st.title("📊 OrderFlow PRO")
+    st.subheader("Configuración de Datos")
+    
+    provider = st.selectbox("API Provider", ["Polygon.io", "Alpha Vantage"])
+    api_key = st.text_input(f"Introduce tu API Key de {provider}", type="password")
+    
+    st.divider()
+    
+    symbol = st.text_input("Símbolo (Ej: AAPL, C:EURUSD, X:BTCUSD)", value="C:EURUSD")
+    n_candles = st.slider("Velas de análisis", 50, 500, 100)
+    
+    btn_run = st.button("EJECUTAR MODELOS", type="primary")
+    
+    st.info("💡 Este software requiere tu propia API Key (disponible gratis en polygon.io o alphavantage.co)")
+
+# ─── DASHBOARD PRINCIPAL ──────────────────────────────────────────────────────
+
+if btn_run and api_key:
+    df = get_data_pro(api_key, provider, symbol, limit=n_candles)
+    
+    if df is not None:
+        df, paths, markov_probs = calc_quant_metrics(df)
         
-        # CÁLCULOS Z-EFF
-        W = 20
-        df['Spread'] = abs(df['High'] - df['Low'])
-        vol_ma = df['Volume'].rolling(5).mean().replace(0, np.nan).ffill().fillna(1)
-        df['V_Eff'] = df['Spread'] / (vol_ma + 1e-10)
-        df['Z_Eff'] = (df['V_Eff'] - df['V_Eff'].rolling(W).mean()) / (df['V_Eff'].rolling(W).std() + 1e-10)
+        # COLUMNAS DE MÉTRICAS (KPIs)
+        k1, k2, k3, k4 = st.columns(4)
+        last_p = df['Close'].iloc[-1]
+        z_val = df['z_flow'].iloc[-1]
         
-        # CÁLCULOS Z-DIFF
-        df['Ret'] = df['Close'].pct_change().fillna(0)
-        df['RMF'] = (df['Close'] * df['Spread'] * 1000).fillna(0)
-        diff = df['Ret'].rolling(14).sum() - df['RMF'].pct_change().rolling(14).sum()
-        df['Z_Diff'] = (diff - diff.rolling(14).mean()) / (diff.rolling(14).std() + 1e-10)
+        k1.metric("Precio Actual", f"{last_p:,.4f}")
+        k2.metric("Z-Flow (OrderFlow)", f"{z_val:.2f}", delta="Institucional" if z_val > 1.5 else "Retail")
         
-        # VWAP
-        tp = (df['High'] + df['Low'] + df['Close']) / 3
-        df['VWAP'] = (tp * df['Volume']).rolling(30).sum() / (df['Volume'].rolling(30).sum() + 1e-10)
+        # Probabilidad de subida basada en Monte Carlo
+        prob_up = (paths[:, -1] > last_p).mean() * 100
+        k3.metric("Prob. Alcista (MC)", f"{prob_up:.1f}%")
         
-        return df.fillna(0)
-    except: return None
+        # Estado Markov
+        k4.metric("Prob. Continuidad", f"{markov_probs.max()*100:.1f}%")
 
-# --- 2. INTERFAZ ---
-st.title("🏹 Z-Sniper v8: Monitor de Absorción")
+        # GRÁFICO MAESTRO
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
+                           vertical_spacing=0.05, row_heights=[0.7, 0.3])
 
-selected_label = st.sidebar.selectbox("Activo:", list(ASSET_MAP.keys()))
-df = get_data(ASSET_MAP[selected_label])
+        # Velas Japonesas
+        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], 
+                                     low=df['Low'], close=df['Close'], name="Precio"), row=1, col=1)
 
-if df is not None:
-    curr = df.iloc[-1]
-    z_d, z_e = float(curr['Z_Diff']), float(curr['Z_Eff'])
-    
-    # PANEL DE ALERTAS
-    c1, c2, c3 = st.columns([1, 1, 2])
-    c1.metric("Z-Diff Actual", f"{z_d:.2f}")
-    c2.metric("Z-Eff Actual", f"{z_e:.2f}")
-    
-    with c3:
-        if z_d < -1.5 and z_e < -1.0:
-            st.markdown('<div class="blink-buy">🔥 ABSORCIÓN COMPRA</div>', unsafe_allow_html=True)
-        elif z_d > 1.5 and z_e < -1.0:
-            st.markdown('<div class="blink-sell">🚨 ABSORCIÓN VENTA</div>', unsafe_allow_html=True)
-        else:
-            st.info("Buscando anomalías de flujo institucional...")
+        # Proyección Monte Carlo (Capa visual)
+        for i in range(10): # Dibujar 10 rutas aleatorias
+            fig.add_trace(go.Scatter(x=[df.index[-1] + timedelta(hours=4*t) for t in range(5)], 
+                                     y=paths[i, :], mode='lines', 
+                                     line=dict(width=1, color='rgba(0, 255, 255, 0.2)'),
+                                     showlegend=False), row=1, col=1)
 
-    # --- GRÁFICO 1: PRECIO ---
-    fig_p = go.Figure(data=[go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="M15")])
-    fig_p.add_trace(go.Scatter(x=df.index, y=df['VWAP'], line=dict(color='orange', width=2), name="VWAP"))
-    fig_p.update_layout(template="plotly_dark", height=450, xaxis_rangeslider_visible=False, title="Gráfico Operativo 15m")
-    st.plotly_chart(fig_p, use_container_width=True)
+        # Z-Flow Histograma
+        colors = ['red' if x < 0 else 'green' for x in df['z_flow']]
+        fig.add_trace(go.Bar(x=df.index, y=df['z_flow'], marker_color=colors, name="Z-Flow"), row=2, col=1)
 
-    # --- GRÁFICO 2: HISTÓRICO DE INDICADORES (SUBPLOTS) ---
-    st.subheader("📊 Historial de Flujo y Eficiencia")
-    
-    fig_ind = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1, subplot_titles=("Presión de Flujo (Z-Diff)", "Eficiencia de Volumen (Z-Eff)"))
-    
-    # Z-Diff History
-    fig_ind.add_trace(go.Scatter(x=df.index, y=df['Z_Diff'], name="Z-Diff", fill='tozeroy', line=dict(color='#00d4ff')), row=1, col=1)
-    fig_ind.add_hline(y=1.5, line_dash="dash", line_color="red", row=1, col=1)
-    fig_ind.add_hline(y=-1.5, line_dash="dash", line_color="green", row=1, col=1)
-    
-    # Z-Eff History
-    fig_ind.add_trace(go.Scatter(x=df.index, y=df['Z_Eff'], name="Z-Eff", fill='tozeroy', line=dict(color='#ffcc00')), row=2, col=1)
-    fig_ind.add_hline(y=-1.0, line_dash="dot", line_color="white", row=2, col=1)
-    
-    fig_ind.update_layout(template="plotly_dark", height=500, showlegend=False)
-    st.plotly_chart(fig_ind, use_container_width=True)
+        fig.update_layout(height=700, template="plotly_dark", xaxis_rangeslider_visible=False)
+        st.plotly_chart(fig, use_container_width=True)
 
+        # SECCIÓN DE ANÁLISIS TÉCNICO-CUANTITATIVO
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader("🎯 Proyección de Precios (5 velas)")
+            st.write(f"Percentil 95% (Techo): {np.percentile(paths[:, -1], 95):,.4f}")
+            st.write(f"Mediana Esperada: {np.median(paths[:, -1]):,.4f}")
+            st.write(f"Percentil 5% (Suelo): {np.percentile(paths[:, -1], 5):,.4f}")
+        
+        with c2:
+            st.subheader("⛓️ Probabilidades de Markov")
+            st.write(f"Prob. de Reversión: {1 - markov_probs.max():.2%}")
+            st.write("Estado actual del mercado:", "SOBRECOMPRA" if z_val > 2 else "ESTABLE" if z_val > -2 else "CAPITULACIÓN")
+
+    else:
+        st.error("No se pudieron obtener datos. Verifica tu API Key y el Símbolo.")
 else:
-    st.error("Esperando datos del mercado...")
+    st.warning("👈 Por favor, introduce tu API Key y haz clic en Ejecutar.")
+
+# ─── FOOTER LEGAL ─────────────────────────────────────────────────────────────
+st.divider()
+st.caption("Aviso Legal: Este software es una herramienta de análisis estadístico. No constituye asesoría financiera. El uso de APIs de terceros está sujeto a los términos de servicio de Polygon.io o Alpha Vantage.")
