@@ -19,6 +19,22 @@ from typing import Dict, List, Tuple
 import warnings
 warnings.filterwarnings('ignore')
 
+# Intentar importar funciones avanzadas (opcional)
+try:
+    from advanced_functions import (
+        ml_forecast_interest_rates,
+        detect_economic_cycle,
+        calculate_economic_volatility_index,
+        generate_stress_scenarios,
+        generate_economic_alerts,
+        analyze_fed_policy_stance,
+        calculate_market_sentiment_score
+    )
+    ADVANCED_FEATURES_AVAILABLE = True
+except ImportError:
+    ADVANCED_FEATURES_AVAILABLE = False
+    st.warning("⚠️ Módulo advanced_functions no encontrado. Funciones básicas activas.")
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # CONFIGURACIÓN DE PÁGINA
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -161,7 +177,7 @@ def get_fred_data(series_id: str, start_date: str = None) -> pd.Series:
     """
     try:
         # IMPORTANTE: Reemplaza con tu API key de FRED
-        fred = Fred(api_key='0f9bdf4cb9ec1c68dc8ddbfa480a7069')
+        fred = Fred(api_key='TU_API_KEY_AQUI')
         
         if start_date is None:
             start_date = (datetime.now() - timedelta(days=365*5)).strftime('%Y-%m-%d')
@@ -665,6 +681,26 @@ def main():
         st.image("https://img.icons8.com/fluency/96/000000/stocks-growth.png", width=80)
         st.title("⚙️ Configuración")
         
+        # Toggle funciones avanzadas
+        if ADVANCED_FEATURES_AVAILABLE:
+            st.markdown("### 🚀 Funciones Avanzadas")
+            use_ml_forecast = st.checkbox("Usar ML para proyecciones", value=False, 
+                help="Usa Random Forest en vez de regresión lineal")
+            show_cycle_analysis = st.checkbox("Análisis de ciclo económico", value=True)
+            show_fed_policy = st.checkbox("Análisis postura Fed (Taylor)", value=True)
+            enable_stress_test = st.checkbox("Escenarios de estrés", value=False)
+            enable_auto_alerts = st.checkbox("Alertas automáticas", value=True)
+            show_market_sentiment = st.checkbox("Score de sentimiento", value=True)
+            st.markdown("---")
+        else:
+            use_ml_forecast = False
+            show_cycle_analysis = False
+            show_fed_policy = False
+            enable_stress_test = False
+            enable_auto_alerts = False
+            show_market_sentiment = False
+            st.info("💡 Instala advanced_functions para más características")
+        
         analysis_period = st.selectbox(
             "Período de análisis",
             ["1 año", "2 años", "5 años", "10 años"],
@@ -716,12 +752,37 @@ def main():
             macro_indicators = get_macro_indicators()
             market_data = get_market_data()
             
-            # Calcular proyecciones
-            forecast_df = forecast_interest_rates(interest_rates, forecast_months)
+            # Calcular proyecciones (con o sin ML)
+            if ADVANCED_FEATURES_AVAILABLE and use_ml_forecast:
+                st.info("🤖 Usando Machine Learning para proyecciones...")
+                forecast_df = ml_forecast_interest_rates(interest_rates, forecast_months)
+            else:
+                forecast_df = forecast_interest_rates(interest_rates, forecast_months)
             
             # Calcular métricas
             yield_slope = calculate_yield_curve_slope(interest_rates)
             recession_prob = calculate_recession_probability(macro_indicators)
+            
+            # Funciones avanzadas opcionales
+            if ADVANCED_FEATURES_AVAILABLE:
+                if enable_stress_test:
+                    stress_scenarios = generate_stress_scenarios(forecast_df)
+                else:
+                    stress_scenarios = None
+                
+                if enable_auto_alerts:
+                    alerts = generate_economic_alerts(interest_rates, macro_indicators, recession_prob)
+                else:
+                    alerts = []
+                
+                if show_market_sentiment:
+                    market_sentiment = calculate_market_sentiment_score(market_data)
+                else:
+                    market_sentiment = None
+            else:
+                stress_scenarios = None
+                alerts = []
+                market_sentiment = None
             
         except Exception as e:
             st.error(f"Error cargando datos: {e}")
@@ -807,6 +868,85 @@ def main():
             - Oferta monetaria (M2)
             - Inflación (CPI)
             """)
+        
+        # ALERTAS AUTOMÁTICAS (si están habilitadas)
+        if ADVANCED_FEATURES_AVAILABLE and enable_auto_alerts and alerts:
+            st.markdown('<p class="section-header">🚨 Alertas Económicas Automáticas</p>', unsafe_allow_html=True)
+            
+            for alert in alerts[:5]:  # Mostrar top 5
+                alert_type = alert.get('type', 'info')
+                
+                if alert_type == 'critical':
+                    box_style = 'border-color: #ef4444; background: rgba(239, 68, 68, 0.1)'
+                elif alert_type == 'warning':
+                    box_style = 'border-color: #f59e0b; background: rgba(245, 158, 11, 0.1)'
+                else:
+                    box_style = 'border-color: #3b82f6; background: rgba(59, 130, 246, 0.1)'
+                
+                st.markdown(f'''
+                <div style="border-left: 4px solid; {box_style}; padding: 1rem; border-radius: 8px; margin: 0.5rem 0;">
+                    <strong>{alert['title']}</strong><br>
+                    {alert['message']}<br>
+                    <small style="color: rgba(255,255,255,0.6);">💡 {alert['action']}</small>
+                </div>
+                ''', unsafe_allow_html=True)
+        
+        # ANÁLISIS DE CICLO ECONÓMICO
+        if ADVANCED_FEATURES_AVAILABLE and show_cycle_analysis:
+            if 'GDP' in macro_indicators and 'Unemployment' in macro_indicators:
+                cycle_phase = detect_economic_cycle(
+                    macro_indicators['GDP'], 
+                    macro_indicators['Unemployment']
+                )
+                
+                st.markdown('<p class="section-header">🔄 Fase del Ciclo Económico</p>', unsafe_allow_html=True)
+                st.markdown(f'<div class="info-box"><strong>{cycle_phase}</strong></div>', unsafe_allow_html=True)
+        
+        # SENTIMIENTO DE MERCADO
+        if ADVANCED_FEATURES_AVAILABLE and show_market_sentiment and market_sentiment is not None:
+            st.markdown('<p class="section-header">📊 Score de Sentimiento de Mercado</p>', unsafe_allow_html=True)
+            
+            col_sent1, col_sent2 = st.columns([2, 1])
+            
+            with col_sent1:
+                # Crear gauge de sentimiento
+                fig_sentiment = go.Figure(go.Indicator(
+                    mode="gauge+number",
+                    value=market_sentiment,
+                    domain={'x': [0, 1], 'y': [0, 1]},
+                    title={'text': "Sentimiento Agregado", 'font': {'size': 20, 'color': 'white'}},
+                    gauge={
+                        'axis': {'range': [None, 100], 'tickwidth': 1, 'tickcolor': "white"},
+                        'bar': {'color': "#3b82f6"},
+                        'bgcolor': "rgba(255,255,255,0.1)",
+                        'steps': [
+                            {'range': [0, 30], 'color': 'rgba(239, 68, 68, 0.3)'},
+                            {'range': [30, 70], 'color': 'rgba(245, 158, 11, 0.3)'},
+                            {'range': [70, 100], 'color': 'rgba(16, 185, 129, 0.3)'}
+                        ],
+                    }
+                ))
+                
+                fig_sentiment.update_layout(
+                    height=250,
+                    template='plotly_dark',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    font={'color': "white", 'family': "Inter"}
+                )
+                
+                st.plotly_chart(fig_sentiment, use_container_width=True)
+            
+            with col_sent2:
+                st.markdown("### Interpretación")
+                if market_sentiment > 70:
+                    st.success("🟢 **Optimista**: Mercados alcistas, apetito por riesgo alto")
+                elif market_sentiment > 50:
+                    st.info("🟡 **Neutral-Positivo**: Sentimiento equilibrado con sesgo alcista")
+                elif market_sentiment > 30:
+                    st.warning("🟠 **Neutral-Negativo**: Cautela en mercados")
+                else:
+                    st.error("🔴 **Pesimista**: Aversión al riesgo, mercados bajistas")
         
         # Curva de rendimientos
         st.markdown('<p class="section-header">📉 Curva de Rendimientos Actual</p>', unsafe_allow_html=True)
@@ -977,6 +1117,64 @@ def main():
                         st.markdown('<div class="warning-box">⚠️ Desempleo en aumento ({:.1f}% → {:.1f}%)</div>'.format(prev_unemp, current_unemp), unsafe_allow_html=True)
                     else:
                         st.markdown('<div class="info-box">ℹ️ Desempleo estable en {:.1f}%</div>'.format(current_unemp), unsafe_allow_html=True)
+        
+        # ANÁLISIS DE POSTURA FED (TAYLOR RULE)
+        if ADVANCED_FEATURES_AVAILABLE and show_fed_policy:
+            st.markdown('<p class="section-header">🏦 Análisis de Política Monetaria Fed</p>', unsafe_allow_html=True)
+            
+            if 'Fed Funds' in interest_rates.columns:
+                fed_funds_series = interest_rates['Fed Funds'].dropna()
+                
+                if 'CPI' in macro_indicators and 'Unemployment' in macro_indicators:
+                    cpi_series = macro_indicators['CPI'].dropna()
+                    unemp_series = macro_indicators['Unemployment'].dropna()
+                    
+                    if len(fed_funds_series) > 0 and len(cpi_series) > 12 and len(unemp_series) > 0:
+                        fed_analysis = analyze_fed_policy_stance(
+                            fed_funds_series,
+                            cpi_series,
+                            unemp_series
+                        )
+                        
+                        col_fed1, col_fed2, col_fed3 = st.columns([1, 1, 1])
+                        
+                        with col_fed1:
+                            st.metric("Postura Fed", fed_analysis['stance'])
+                            st.caption(fed_analysis['description'])
+                        
+                        with col_fed2:
+                            st.metric("Tasa Actual", f"{fed_analysis['current_rate']:.2f}%")
+                            st.metric("Tasa Taylor", f"{fed_analysis['taylor_rate']:.2f}%")
+                        
+                        with col_fed3:
+                            gap = fed_analysis['policy_gap']
+                            st.metric("Gap de Política", f"{gap:+.2f}%",
+                                    delta="Restrictiva" if gap > 0 else "Acomodaticia")
+                            
+                            st.metric("Inflación Actual", f"{fed_analysis['current_inflation']:.1f}%")
+                        
+                        # Explicación de la Regla de Taylor
+                        with st.expander("ℹ️ ¿Qué es la Regla de Taylor?"):
+                            st.markdown("""
+                            **La Regla de Taylor** es una fórmula que sugiere cuál debería ser el tipo de interés de la Fed 
+                            basándose en:
+                            - Inflación actual vs objetivo (2%)
+                            - Desempleo actual vs NAIRU (tasa natural ~4%)
+                            - Tasa neutral de interés real (~2%)
+                            
+                            **Fórmula simplificada:**
+                            ```
+                            Tasa = 2% + Inflación + 0.5×(Inflación - 2%) + 0.5×(Gap de Output)
+                            ```
+                            
+                            **Interpretación del Gap:**
+                            - **Gap > +1%**: Fed más restrictiva de lo sugerido → Sesgo anti-inflación fuerte
+                            - **Gap entre 0 y +1%**: Política ligeramente restrictiva → Normal en ciclos alcistas
+                            - **Gap entre 0 y -1%**: Política ligeramente acomodaticia → Estimulando economía
+                            - **Gap < -1%**: Fed muy acomodaticia → Crisis o recesión
+                            
+                            **Nota:** La Fed no sigue esta regla mecánicamente, pero es una referencia útil.
+                            """)
     
     # ═══════════════════════════════════════════════════════════════════════════
     # TAB 4: MERCADOS
@@ -1110,6 +1308,79 @@ def main():
                 - Recortes de emergencia
                 - Volatilidad extrema
                 """)
+        
+        # STRESS TEST SCENARIOS (si está habilitado)
+        if ADVANCED_FEATURES_AVAILABLE and enable_stress_test and stress_scenarios:
+            st.markdown('<p class="section-header">🎲 Análisis de Escenarios de Estrés</p>', unsafe_allow_html=True)
+            
+            st.markdown("""
+            **Escenarios simulados** basados en crisis históricas y condiciones extremas:
+            """)
+            
+            # Crear gráfico comparativo de escenarios
+            fig_stress = go.Figure()
+            
+            for scenario_name, scenario_df in stress_scenarios.items():
+                if '10Y Treasury' in scenario_df.columns:
+                    color_map = {
+                        'Base': '#3b82f6',
+                        'Optimista': '#10b981',
+                        'Crisis 2008': '#ef4444',
+                        'Estanflación': '#f59e0b',
+                        'Deflación': '#06b6d4'
+                    }
+                    
+                    fig_stress.add_trace(go.Scatter(
+                        x=scenario_df.index,
+                        y=scenario_df['10Y Treasury'],
+                        mode='lines',
+                        name=scenario_name,
+                        line=dict(
+                            color=color_map.get(scenario_name, '#8b5cf6'),
+                            width=2 if scenario_name == 'Base' else 1.5,
+                            dash='solid' if scenario_name == 'Base' else 'dash'
+                        )
+                    ))
+            
+            fig_stress.update_layout(
+                title='10Y Treasury - Proyección en Múltiples Escenarios',
+                xaxis_title='Fecha',
+                yaxis_title='Rendimiento (%)',
+                template='plotly_dark',
+                hovermode='x unified',
+                height=450,
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)',
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1
+                )
+            )
+            
+            st.plotly_chart(fig_stress, use_container_width=True)
+            
+            # Tabla comparativa de escenarios
+            st.markdown("#### Tabla Comparativa de Escenarios (12 meses)")
+            
+            comparison_data = []
+            for scenario_name, scenario_df in stress_scenarios.items():
+                if len(scenario_df) > 0 and '10Y Treasury' in scenario_df.columns:
+                    final_10y = scenario_df['10Y Treasury'].iloc[-1]
+                    current_10y = interest_rates['10Y Treasury'].iloc[-1] if '10Y Treasury' in interest_rates.columns else 0
+                    change = final_10y - current_10y
+                    
+                    comparison_data.append({
+                        'Escenario': scenario_name,
+                        '10Y Proyectado': f"{final_10y:.2f}%",
+                        'Cambio vs Actual': f"{change:+.2f}%",
+                        'Impacto': '🔴 Alto' if abs(change) > 2 else '🟡 Moderado' if abs(change) > 1 else '🟢 Bajo'
+                    })
+            
+            if comparison_data:
+                st.dataframe(pd.DataFrame(comparison_data), use_container_width=True, hide_index=True)
         
         # Recomendaciones estratégicas
         st.markdown('<p class="section-header">💡 Recomendaciones Estratégicas</p>', unsafe_allow_html=True)
