@@ -161,7 +161,7 @@ def get_fred_data(series_id: str, start_date: str = None) -> pd.Series:
     """
     try:
         # IMPORTANTE: Reemplaza con tu API key de FRED
-        fred = Fred(api_key='TU_API_KEY_AQUI')
+        fred = Fred(api_key='0f9bdf4cb9ec1c68dc8ddbfa480a7069')
         
         if start_date is None:
             start_date = (datetime.now() - timedelta(days=365*5)).strftime('%Y-%m-%d')
